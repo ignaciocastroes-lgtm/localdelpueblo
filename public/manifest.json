@@ -1,0 +1,14 @@
+{
+  "name": "Kiosko - Minimarket Internacional",
+  "short_name": "Kiosko",
+  "description": "Sistema de punto de venta para kiosko",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#020617",
+  "theme_color": "#001529",
+  "icons": [
+    { "src": "/icon-dark-32x32.png", "sizes": "32x32", "type": "image/png" },
+    { "src": "/apple-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
