@@ -31,7 +31,7 @@ export function NotificationBell({ products, onNavigateToInventory }: Notificati
     .filter(p => p.stock <= (p as any).minStock || p.stock <= 5)
     .map(p => ({
       product: p,
-      type: p.stock === 0 ? 'out' : 'low'
+      type: (p.stock === 0 ? 'out' : 'low') as 'out' | 'low'
     }))
     .sort((a, b) => a.product.stock - b.product.stock)
 

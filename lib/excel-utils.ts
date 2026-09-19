@@ -43,6 +43,7 @@ export async function parseProductsFromExcel(file: File, existingProducts: Produ
         price: Number(cols[4]) || 0,
         stock: Number(cols[5]) || 0,
         visibleInPOS: true,
+        customizable: false,
         image: ''
       })
     }

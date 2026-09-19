@@ -11,13 +11,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { FieldGroup, Field, FieldLabel } from '@/components/ui/field'
 import { formatCLP, type Payable, type PayablePayment } from '@/lib/store'
+import { PaymentDetailsFields, ReceiptViewer, CashSourceField, type PaymentExtra } from '@/components/payment-details'
+import { saveReceipt } from '@/lib/receipt-store'
 import { toast } from 'sonner'
 
 interface PayablesProps {
   payables: Payable[]
   payments: PayablePayment[]
   onAddPayable: (p: Omit<Payable, 'id' | 'amountPaid' | 'status'>) => void
-  onPayPayable: (payableId: string, amount: number, method: 'cash' | 'transfer' | 'card') => void
+  onPayPayable: (payableId: string, amount: number, method: 'cash' | 'transfer' | 'card', extra?: PaymentExtra) => void
 }
 
 export function Payables({ payables, payments, onAddPayable, onPayPayable }: PayablesProps) {
@@ -27,6 +29,9 @@ export function Payables({ payables, payments, onAddPayable, onPayPayable }: Pay
   const [selectedPayable, setSelectedPayable] = useState<Payable | null>(null)
   const [paymentAmount, setPaymentAmount] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'transfer' | 'card'>('cash')
+  const [cashSource, setCashSource] = useState<'caja' | 'dueno' | null>(null)
+  const [paymentReference, setPaymentReference] = useState('')
+  const [paymentReceipt, setPaymentReceipt] = useState<string | null>(null)
 
   const [newForm, setNewForm] = useState({ supplierName: '', description: '', amount: '' })
 
@@ -47,8 +52,12 @@ export function Payables({ payables, payments, onAddPayable, onPayPayable }: Pay
   const stats = useMemo(() => {
     const totalOwed = payables.reduce((sum, p) => sum + Math.max(0, p.amount - p.amountPaid), 0)
     const suppliersCount = new Set(payables.filter(p => p.status !== 'paid').map(p => p.supplierName)).size
+    const now = new Date()
     const totalPaidThisMonth = payments
-      .filter(p => new Date(p.date).getMonth() === new Date().getMonth())
+      .filter(p => {
+        const d = new Date(p.date)
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      })
       .reduce((sum, p) => sum + p.amount, 0)
     return { totalOwed, suppliersCount, totalPaidThisMonth }
   }, [payables, payments])
@@ -70,17 +79,33 @@ export function Payables({ payables, payments, onAddPayable, onPayPayable }: Pay
 
   const openPaymentDialog = (p: Payable) => {
     setSelectedPayable(p)
+    setCashSource(null)
+    setPaymentReference('')
+    setPaymentReceipt(null)
     setPaymentAmount((p.amount - p.amountPaid).toString())
     setShowPaymentDialog(true)
   }
 
-  const handlePayment = () => {
+  const handlePayment = async () => {
     const amount = parseInt(paymentAmount)
     if (selectedPayable && amount > 0) {
-      onPayPayable(selectedPayable.id, amount, paymentMethod)
+      const pendiente = selectedPayable.amount - selectedPayable.amountPaid
+      if (amount > pendiente) {
+        toast.error(`El pago no puede superar lo pendiente (${formatCLP(pendiente)}).`)
+        return
+      }
+      if (paymentMethod === 'cash' && !cashSource) { toast.error('Indica de dónde salió el efectivo: del cajón o de tu bolsillo.'); return }
+      let receiptId: string | undefined
+      if (paymentReceipt) {
+        receiptId = await saveReceipt(paymentReceipt)
+        if (!receiptId) toast.warning('No se pudo guardar la foto del comprobante; el pago se registró sin ella.')
+      }
+      onPayPayable(selectedPayable.id, amount, paymentMethod, { reference: paymentReference.trim() || undefined, receiptId, cashSource: paymentMethod === 'cash' ? (cashSource ?? undefined) : undefined })
       setShowPaymentDialog(false)
       setSelectedPayable(null)
       setPaymentAmount('')
+      setPaymentReference('')
+      setPaymentReceipt(null)
     }
   }
 
@@ -209,6 +234,8 @@ export function Payables({ payables, payments, onAddPayable, onPayPayable }: Pay
                           <p className="text-xs text-muted-foreground">
                             {new Date(payment.date).toLocaleDateString('es-CL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
                           </p>
+                          {payment.reference && <p className="text-[10px] text-muted-foreground">Op. {payment.reference}</p>}
+                          <ReceiptViewer receiptId={payment.receiptId} />
                         </div>
                         <div className="text-right">
                           <p className="font-bold text-destructive">{formatCLP(payment.amount)}</p>
@@ -287,6 +314,14 @@ export function Payables({ payables, payments, onAddPayable, onPayPayable }: Pay
                 </SelectContent>
               </Select>
             </Field>
+            {paymentMethod === 'cash' && <CashSourceField value={cashSource} onChange={setCashSource} />}
+            <PaymentDetailsFields
+              method={paymentMethod}
+              reference={paymentReference}
+              onReferenceChange={setPaymentReference}
+              receipt={paymentReceipt}
+              onReceiptChange={setPaymentReceipt}
+            />
           </FieldGroup>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancelar</Button>

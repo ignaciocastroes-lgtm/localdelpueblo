@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { rejectForeignOrigin } from '@/lib/api-guard'
 
 // Esta ruta corre en el servidor de Vercel, nunca en la tablet.
 // La URL del webhook de Make es secreta: se configura como variable de
@@ -11,6 +12,9 @@ import { NextRequest, NextResponse } from 'next/server'
 // sistema contable, etc.), que es donde vive la fuente de verdad.
 
 export async function POST(request: NextRequest) {
+  const blocked = rejectForeignOrigin(request)
+  if (blocked) return blocked
+
   const webhookUrl = process.env.MAKE_WEBHOOK_URL
 
   if (!webhookUrl) {
@@ -24,6 +28,10 @@ export async function POST(request: NextRequest) {
   try {
     payload = await request.json()
   } catch {
+    return NextResponse.json({ error: 'Cuerpo de la petición inválido' }, { status: 400 })
+  }
+
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return NextResponse.json({ error: 'Cuerpo de la petición inválido' }, { status: 400 })
   }
 

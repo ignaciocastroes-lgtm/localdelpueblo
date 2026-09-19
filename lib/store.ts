@@ -71,6 +71,11 @@ export interface Product {
   // no haya foto real tomada por el vendedor. No depende de internet ni de
   // licencias de fotos de terceros, así que nunca se rompe ni se ve mal.
   emoji?: string
+  // "Hoy hay": el administrador enciende o apaga el producto según el día (sandía, albahaca...).
+  // Sin dato = encendido. Un producto apagado se ve atenuado en el POS y el vendedor puede venderlo igual.
+  availableToday?: boolean
+  // Crédito de la foto cuando viene de internet (autor · licencia · fuente). Se muestra en Stock → Créditos de fotos.
+  imageCredit?: string
 }
 
 export interface CartItemModifier {
@@ -79,8 +84,13 @@ export interface CartItemModifier {
 }
 
 export interface CartItemDiscount {
-  type: 'percent' | 'amount'
+  // percent: % sobre cada unidad · amount: $ menos por unidad ·
+  // bundle: promoción "lleva N paga M" (3x2, 2x1) — solo rebaja los grupos completos
+  // total: precio final de la LÍNEA completa (remate: "las 3 lechugas a $2.000")
+  type: 'percent' | 'amount' | 'bundle' | 'total'
   value: number
+  buy?: number   // bundle: unidades que lleva el cliente por grupo (ej. 3)
+  pay?: number   // bundle: unidades que paga por grupo (ej. 2)
   // Etiqueta libre para el ticket/cierre, ej. "3x2", "Stock viejo"
   label?: string
 }
@@ -104,11 +114,23 @@ export interface Transaction {
   id: string
   memberId: string | null
   memberName?: string
-  items: { productId: string; productName: string; quantity: number; price: number; modifiers?: CartItemModifier[] }[]
+  items: {
+    productId: string; productName: string; quantity: number; price: number; modifiers?: CartItemModifier[]
+    lineTotal?: number          // lo cobrado por la línea (con descuento)
+    listTotal?: number          // lo que valía sin descuento (para medir regalos y remates)
+    discountLabel?: string      // "3x2", "Regalo", "Remate", "-20%"...
+    saleMode?: 'pesar' | 'monto'
+    weightGrams?: number
+    soldWithoutStock?: boolean  // se vendió estando apagado o sin stock registrado
+  }[]
   total: number
-  type: 'cash' | 'credit' | 'mercadopago'
+  type: 'cash' | 'credit' | 'mercadopago' | 'transfer'
   date: string
   shift: string
+  // Transferencia: el vendedor fotografía el voucher y confirma el abono en el banco
+  reference?: string
+  receiptId?: string
+  verified?: boolean
 }
 
 export interface Payment {
@@ -166,6 +188,23 @@ export interface MermaEntry {
   cantidad: number
   motivo: string
   date: string
+  // merma: se echó a perder · regalo: se regaló · conteo: faltante detectado al contar ·
+  // sobrante: al contar había más de lo registrado (no es pérdida)
+  kind?: 'merma' | 'regalo' | 'conteo' | 'sobrante'
+  costValue?: number   // valor de lo perdido a costo (CLP), fijado al registrarlo
+}
+
+// Gastos del puesto y retiros del dueño. Lo que sale en EFECTIVO baja el efectivo esperado del arqueo.
+export interface Expense {
+  id: string
+  date: string
+  amount: number
+  kind: 'gasto' | 'retiro'
+  category: string
+  note?: string
+  method: 'cash' | 'transfer'
+  receiptId?: string
+  cashSource?: CashSource   // solo gastos en efectivo (un retiro siempre sale del cajón)
 }
 
 export interface Payable {
@@ -178,6 +217,12 @@ export interface Payable {
   status: 'pending' | 'partial' | 'paid'
 }
 
+// De dónde sale el efectivo de una compra o gasto:
+//  'caja'  = del cajón del puesto → baja el efectivo esperado del arqueo
+//  'dueno' = de la plata del dueño (bolsillo) → NO toca el cajón
+// Sin dato (registros anteriores a esta versión) se trata como 'caja'.
+export type CashSource = 'caja' | 'dueno'
+
 export interface PayablePayment {
   id: string
   payableId: string
@@ -185,6 +230,9 @@ export interface PayablePayment {
   amount: number
   date: string
   method: 'cash' | 'transfer' | 'card'
+  reference?: string   // n° de operación (transferencias, tarjeta)
+  receiptId?: string   // foto del comprobante (guardada en lib/receipt-store.ts)
+  cashSource?: CashSource   // solo pagos en efectivo
 }
 
 export interface ClosureLogEntry {
@@ -197,6 +245,8 @@ export interface ClosureLogEntry {
   cashCounted: number | null
   cashDifference: number | null
   sentToMake: boolean
+  supplierCashPayments?: number   // pagos a proveedores hechos en efectivo durante el turno
+  expenseCashPayments?: number    // gastos y retiros pagados en efectivo durante el turno
 }
 
 // Modifier Groups
@@ -278,27 +328,6 @@ export const modifierGroups: ModifierGroup[] = [
 // para no romper pantallas que aún no se migran esta ronda.
 export const defaultMembers: Member[] = []
 
-// Product images from Unsplash (category-specific) - verified working URLs
-const productImages = {
-  gatorade: 'https://images.unsplash.com/photo-1632818924360-68d4994cfdb2?w=400&h=300&fit=crop&q=80',
-  water: 'https://images.unsplash.com/photo-1560023907-5f339617ea30?w=400&h=300&fit=crop&q=80',
-  juice: 'https://images.unsplash.com/photo-1621506289937-a8e4df240d0b?w=400&h=300&fit=crop&q=80',
-  energy: 'https://images.unsplash.com/photo-1622766815178-641bef2b0094?w=400&h=300&fit=crop&q=80',
-  chips: 'https://images.unsplash.com/photo-1566478989037-eec170784d0b?w=400&h=300&fit=crop&q=80',
-  cereal: 'https://images.unsplash.com/photo-1490885578174-acda8905c2c6?w=400&h=300&fit=crop&q=80',
-  nuts: 'https://images.unsplash.com/photo-1599599810769-bcde5a160d32?w=400&h=300&fit=crop&q=80',
-  chocolate: 'https://images.unsplash.com/photo-1511381939415-e44015466834?w=400&h=300&fit=crop&q=80',
-  hotdog: 'https://images.unsplash.com/photo-1619740455993-9e612b50456f?w=400&h=300&fit=crop&q=80',
-  sandwich: 'https://images.unsplash.com/photo-1553909489-cd47e0907980?w=400&h=300&fit=crop&q=80',
-  empanada: 'https://images.unsplash.com/photo-1601050690597-df0568f70950?w=400&h=300&fit=crop&q=80',
-  fries: 'https://images.unsplash.com/photo-1630384060421-cb20d0e0649d?w=400&h=300&fit=crop&q=80',
-  sopaipilla: 'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=400&h=300&fit=crop&q=80',
-  hockeytape: 'https://images.unsplash.com/photo-1515703407324-5f753afd8be8?w=400&h=300&fit=crop&q=80',
-  sports: 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=400&h=300&fit=crop&q=80',
-  bag: 'https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=400&h=300&fit=crop&q=80',
-  towel: 'https://images.unsplash.com/photo-1583248369069-9d91f1640fe6?w=400&h=300&fit=crop&q=80',
-  gloves: 'https://images.unsplash.com/photo-1596496181871-9681eacf9764?w=400&h=300&fit=crop&q=80',
-}
 
 export const defaultProducts: Product[] = [
   // Verduras — venta por peso (a granel, como se compra en La Vega)
@@ -464,8 +493,9 @@ export function formatWeight(grams: number): string {
 }
 
 // Aplica el descuento manual de un ítem (si tiene) sobre su precio ya calculado.
+// (Los descuentos 'bundle' dependen de la cantidad: usar cartLineTotal.)
 export function applyItemDiscount(itemTotal: number, discount?: CartItemDiscount): number {
-  if (!discount) return itemTotal
+  if (!discount || discount.type === 'bundle' || discount.type === 'total') return itemTotal
   if (discount.type === 'percent') return Math.max(0, Math.round(itemTotal * (1 - discount.value / 100)))
   return Math.max(0, itemTotal - discount.value)
 }
@@ -477,6 +507,66 @@ export function applyItemDiscount(itemTotal: number, discount?: CartItemDiscount
 // normativa vigente sobre el redondeo en Chile).
 export function roundToNearestTen(amount: number): number {
   return Math.round(amount / 10) * 10
+}
+
+// === ARQUEO DE CAJA ===
+// Efectivo esperado en el cajón = fondo inicial
+//   + ventas en efectivo
+//   - compras y pagos a proveedores hechos en efectivo (Pasivos)
+//   - gastos y retiros del dueño hechos en efectivo.
+// Transferencias y tarjeta a proveedores no pasan por el cajón: se informan aparte.
+// Las ventas con Mercado Pago tampoco entran al cajón.
+
+export interface CashSession {
+  cashFloatStart: number
+  cashSales: number
+  supplierCashOut: number
+  supplierCashCount: number
+  expenseCashOut: number      // gastos y retiros pagados en efectivo desde el cajón
+  expenseCashCount: number
+  ownerCashOut: number        // efectivo pagado con plata del dueño (no baja el cajón)
+  ownerCashCount: number
+  cashExpected: number
+  supplierOtherOut: { transfer: number; card: number }
+}
+
+export function computeCashSession(args: {
+  cashFloatStart: number
+  sales: { total: number; type: string }[]
+  supplierPayments: PayablePayment[]
+  expenses?: Expense[]
+}): CashSession {
+  const sum = (list: { amount: number }[]) => list.reduce((t, x) => t + x.amount, 0)
+  const cashSales = args.sales.filter(x => x.type === 'cash').reduce((t, x) => t + x.total, 0)
+  // Solo baja el cajón lo pagado en efectivo DESDE el cajón. Si el dueño pagó con su propia plata
+  // (ej. compra en La Vega con su bolsillo) el cajón no se toca: contarlo generaba un "sobrante" falso.
+  const fromDrawer = (x: { cashSource?: CashSource }) => x.cashSource !== 'dueno'
+  const supplierCashAll = args.supplierPayments.filter(p => p.method === 'cash')
+  const expenseCashAll = (args.expenses ?? []).filter(e => e.method === 'cash')
+  const supplierCash = supplierCashAll.filter(fromDrawer)
+  const expenseCash = expenseCashAll.filter(fromDrawer)
+  const ownerPaid = [...supplierCashAll, ...expenseCashAll].filter(x => !fromDrawer(x))
+  const by = (m: string) => sum(args.supplierPayments.filter(p => p.method === m))
+
+  return {
+    cashFloatStart: args.cashFloatStart,
+    cashSales,
+    supplierCashOut: sum(supplierCash),
+    supplierCashCount: supplierCash.length,
+    expenseCashOut: sum(expenseCash),
+    expenseCashCount: expenseCash.length,
+    ownerCashOut: sum(ownerPaid),
+    ownerCashCount: ownerPaid.length,
+    cashExpected: args.cashFloatStart + cashSales - sum(supplierCash) - sum(expenseCash),
+    supplierOtherOut: { transfer: by('transfer'), card: by('card') },
+  }
+}
+
+// Movimientos registrados desde que se abrió la caja del turno.
+export function paymentsSince<T extends { date: string }>(list: T[], startISO: string | null): T[] {
+  if (!startISO) return []
+  const start = new Date(startISO).getTime()
+  return list.filter(p => new Date(p.date).getTime() >= start)
 }
 
 // LocalStorage utilities
@@ -498,7 +588,12 @@ const STORAGE_KEYS = {
   PAYABLES: 'puesto-pueblo-payables',
   PAYABLE_PAYMENTS: 'puesto-pueblo-payable-payments',
   CASH_FLOAT: 'puesto-pueblo-cash-float',
+  SHIFT_STARTED_AT: 'puesto-pueblo-shift-started-at',
   MERMA_LOG: 'puesto-pueblo-merma-log',
+  EXPENSES: 'puesto-pueblo-expenses',
+  DAY_OPENING: 'puesto-pueblo-day-opening',
+  OFF_MODIFIERS: 'puesto-pueblo-off-modifiers',
+  PURCHASES: 'puesto-pueblo-purchases',
 }
 
 // Parser CSV real: respeta comillas y comas dentro de campos ("Producto, grande" no se rompe)
@@ -532,14 +627,19 @@ export function loadFromStorage<T>(key: string, defaultValue: T): T {
   }
 }
 
-export function saveToStorage<T>(key: string, value: T): void {
-  if (typeof window === 'undefined') return
+export function saveToStorage<T>(key: string, value: T): boolean {
+  if (typeof window === 'undefined') return false
   try {
     localStorage.setItem(key, JSON.stringify(value))
     // Update last sync timestamp
     localStorage.setItem(STORAGE_KEYS.LAST_SYNC, new Date().toISOString())
+    return true
   } catch (error) {
     console.error('Error saving to localStorage:', error)
+    // Memoria llena o bloqueada: antes fallaba en silencio y los datos se
+    // perdían al recargar. Ahora la pantalla principal avisa al usuario.
+    window.dispatchEvent(new CustomEvent('kiosko:storage-error', { detail: { key } }))
+    return false
   }
 }
 
@@ -559,6 +659,7 @@ export const StorageKeys = STORAGE_KEYS
 export interface GalleryEntry {
   label: string
   image: string
+  credit?: string
   updatedAt: string
 }
 
@@ -566,11 +667,11 @@ export function getPhotoGallery(): GalleryEntry[] {
   return loadFromStorage<GalleryEntry[]>(STORAGE_KEYS.PHOTO_GALLERY, [])
 }
 
-export function saveToPhotoGallery(label: string, image: string): void {
+export function saveToPhotoGallery(label: string, image: string, credit?: string): void {
   const gallery = getPhotoGallery()
   const key = label.trim().toLowerCase()
   const existingIdx = gallery.findIndex(g => g.label.trim().toLowerCase() === key)
-  const entry: GalleryEntry = { label: label.trim(), image, updatedAt: new Date().toISOString() }
+  const entry: GalleryEntry = { label: label.trim(), image, credit, updatedAt: new Date().toISOString() }
   if (existingIdx >= 0) gallery[existingIdx] = entry
   else gallery.push(entry)
   saveToStorage(STORAGE_KEYS.PHOTO_GALLERY, gallery)
@@ -618,7 +719,7 @@ export function downloadFullBackup() {
 
 export function restoreFullBackup(backup: Record<string, any>): { ok: boolean; error?: string } {
   if (typeof window === 'undefined') return { ok: false, error: 'No disponible' }
-  if (!backup || typeof backup !== 'object' || !backup._meta) {
+  if (!backup || typeof backup !== 'object' || !backup._meta || backup._meta.app !== 'el-puesto-del-pueblo') {
     return { ok: false, error: 'El archivo no parece ser un respaldo válido de esta app.' }
   }
   try {
@@ -697,4 +798,200 @@ export async function sendDebtWhatsApp(member: Member, itemsDetail?: string): Pr
   else window.open(url, '_blank')
 
   return { ok: true }
+}
+
+// Total real de una línea del carrito (precio × cantidad, con su descuento).
+// 3x2 con 3 unidades cobra 2; con 4 unidades cobra 3 (solo rebaja el grupo completo);
+// con 1 o 2 unidades no rebaja nada.
+export function cartLineTotal(item: { itemTotal: number; quantity: number; discount?: CartItemDiscount }): number {
+  const d = item.discount
+  if (d?.type === 'total') return Math.max(0, Math.round(d.value))
+  if (d?.type === 'bundle' && d.buy && d.pay !== undefined && d.buy > d.pay) {
+    const groups = Math.floor(item.quantity / d.buy)
+    const payableUnits = item.quantity - groups * (d.buy - d.pay)
+    return item.itemTotal * payableUnits
+  }
+  return applyItemDiscount(item.itemTotal, d) * item.quantity
+}
+
+// === COMPRAS (el dueño compra en volumen y las registra) ===
+// Cantidad: kg (se guarda en gramos en el stock) para productos por peso; unidades o
+// atados para el resto. `cost` es el costo TOTAL de esa línea en pesos.
+export interface PurchaseLine {
+  productId: string
+  productName: string
+  quantity: number      // kg si el producto es por peso; unidades/atados si no
+  unit: 'kg' | 'un'
+  cost: number          // costo total de la línea (CLP)
+}
+
+export interface Purchase {
+  id: string
+  date: string
+  supplierName: string
+  lines: PurchaseLine[]
+  total: number
+  paidNow: number       // lo pagado al registrar la compra
+  method?: 'cash' | 'transfer' | 'card'
+  cashSource?: CashSource
+  reference?: string
+  receiptId?: string
+  note?: string
+  payableId: string     // deuda/pago asociado en Pasivos
+}
+
+// Efecto de una compra sobre los productos: suma stock (kg → gramos en productos por peso)
+// y, si se pide, deja el costo por kilo/unidad de la última línea de ese producto.
+export function applyPurchaseToProducts<T extends Product>(products: T[], lines: PurchaseLine[], updateCost: boolean): T[] {
+  return products.map(p => {
+    const mine = lines.filter(l => l.productId === p.id)
+    if (mine.length === 0) return p
+    let stock = p.stock
+    let costPrice = p.costPrice
+    for (const l of mine) {
+      stock += p.saleType === 'peso' ? Math.round(l.quantity * 1000) : Math.round(l.quantity)
+      if (updateCost && l.quantity > 0) costPrice = Math.round(l.cost / l.quantity)
+    }
+    return { ...p, stock, costPrice }
+  })
+}
+
+// Deshace el stock de una compra anulada (nunca deja stock negativo).
+export function revertPurchaseFromProducts<T extends Product>(products: T[], lines: PurchaseLine[]): T[] {
+  return products.map(p => {
+    const mine = lines.filter(l => l.productId === p.id)
+    if (mine.length === 0) return p
+    const remove = mine.reduce((sum, l) => sum + (p.saleType === 'peso' ? Math.round(l.quantity * 1000) : Math.round(l.quantity)), 0)
+    return { ...p, stock: Math.max(0, p.stock - remove) }
+  })
+}
+
+// === STOCK DEL DÍA ===
+// El stock es diario: cada mañana parte con lo que quedó contado la noche anterior (o con lo
+// que el dueño registre en la apertura), durante el día sube con las compras y baja con las
+// ventas, los regalos y la merma, y al cerrar se cuenta lo que quedó.
+// Unidades: gramos en productos por peso; unidades o atados en el resto.
+
+const isPeso = (p: Product) => p.saleType === 'peso'
+
+// Valor de lo perdido, a costo (el costo de un producto por peso es por kilo).
+export function lossValue(product: Product, cantidad: number): number {
+  const cost = product.costPrice || 0
+  return Math.round(isPeso(product) ? (cantidad / 1000) * cost : cantidad * cost)
+}
+
+export interface StockRow {
+  productId: string
+  name: string
+  saleType: SaleType
+  opening: number     // con lo que partió el día
+  purchased: number   // + compras del día
+  sold: number        // - vendido
+  lost: number        // - merma, regalos y faltantes ya registrados
+  current: number     // lo que la app dice que hay ahora
+  other: number       // ajustes manuales no explicados por lo anterior (puede ser 0)
+}
+
+export function computeStockBreakdown(args: {
+  products: Product[]
+  opening: Record<string, number> | null
+  sales: { items: { productId: string; quantity: number; weightGrams?: number }[] }[]
+  purchases: Purchase[]
+  mermaLog: MermaEntry[]
+}): StockRow[] {
+  return args.products.map(p => {
+    const opening = args.opening && args.opening[p.id] !== undefined ? args.opening[p.id] : p.stock
+    const sold = args.sales.reduce((sum, sale) => sum + sale.items
+      .filter(i => i.productId === p.id)
+      .reduce((s2, i) => s2 + (isPeso(p) ? (i.weightGrams || 0) : i.quantity), 0), 0)
+    const purchased = args.purchases.reduce((sum, pu) => sum + pu.lines
+      .filter(l => l.productId === p.id)
+      .reduce((s2, l) => s2 + (isPeso(p) ? Math.round(l.quantity * 1000) : Math.round(l.quantity)), 0), 0)
+    const lost = args.mermaLog
+      .filter(m => m.productId === p.id && m.kind !== 'sobrante')
+      .reduce((sum, m) => sum + m.cantidad, 0)
+    return {
+      productId: p.id, name: p.name, saleType: p.saleType || 'unidad',
+      opening, purchased, sold, lost, current: p.stock,
+      other: p.stock - (opening + purchased - sold - lost),
+    }
+  })
+}
+
+// Aplica el conteo de cierre: el stock pasa a ser lo contado; lo que faltaba queda como
+// pérdida valorizada ("Diferencia de conteo") y lo que sobraba como sobrante.
+export function applyStockCount<T extends Product>(products: T[], counts: Record<string, number>): {
+  products: T[]
+  entries: Omit<MermaEntry, 'id' | 'date'>[]
+} {
+  const entries: Omit<MermaEntry, 'id' | 'date'>[] = []
+  const updated = products.map(p => {
+    const counted = counts[p.id]
+    if (counted === undefined || !Number.isFinite(counted) || counted < 0) return p
+    const diff = counted - p.stock
+    if (diff < 0) {
+      entries.push({ productId: p.id, productName: p.name, cantidad: -diff, motivo: 'Diferencia de conteo', kind: 'conteo', costValue: lossValue(p, -diff) })
+    } else if (diff > 0) {
+      entries.push({ productId: p.id, productName: p.name, cantidad: diff, motivo: 'Sobrante de conteo', kind: 'sobrante', costValue: 0 })
+    }
+    return { ...p, stock: counted }
+  })
+  return { products: updated, entries }
+}
+
+// === CONTABILIDAD BÁSICA (control interno, NO es contabilidad tributaria) ===
+export interface AccountingSummary {
+  sales: { total: number; cash: number; transfer: number; mercadopago: number; count: number; transferUnverified: number }
+  discountsGiven: number            // rebaja otorgada en regalos, remates y descuentos
+  purchases: { total: number; paid: number; pending: number }
+  expenses: number                  // gastos del puesto
+  withdrawals: number               // retiros del dueño
+  losses: { merma: number; regalo: number; conteo: number; total: number }   // a costo
+  result: number                    // ventas - compras - gastos (resultado de caja simple)
+  afterWithdrawals: number          // lo que queda después de los retiros
+  electronicReference: number       // 1,5 % referencial sobre ventas con Mercado Pago
+}
+
+export function computeAccounting(args: {
+  transactions: Transaction[]
+  purchases: Purchase[]
+  expenses: Expense[]
+  mermaLog: MermaEntry[]
+  from: Date
+  to: Date
+}): AccountingSummary {
+  const inRange = (iso: string) => { const t = new Date(iso).getTime(); return t >= args.from.getTime() && t <= args.to.getTime() }
+  const tx = args.transactions.filter(t => inRange(t.date))
+  const sumBy = (type: string) => tx.filter(t => t.type === type).reduce((s, t) => s + t.total, 0)
+  const salesTotal = tx.reduce((s, t) => s + t.total, 0)
+
+  const discountsGiven = tx.reduce((sum, t) => sum + t.items.reduce((s2, i) =>
+    i.listTotal !== undefined && i.lineTotal !== undefined && i.listTotal > i.lineTotal ? s2 + (i.listTotal - i.lineTotal) : s2, 0), 0)
+
+  const pu = args.purchases.filter(p => inRange(p.date))
+  const purchasesTotal = pu.reduce((s, p) => s + p.total, 0)
+  const purchasesPaid = pu.reduce((s, p) => s + p.paidNow, 0)
+
+  const ex = args.expenses.filter(e => inRange(e.date))
+  const expenses = ex.filter(e => e.kind === 'gasto').reduce((s, e) => s + e.amount, 0)
+  const withdrawals = ex.filter(e => e.kind === 'retiro').reduce((s, e) => s + e.amount, 0)
+
+  const lossOf = (kind: string) => args.mermaLog.filter(m => inRange(m.date) && (m.kind || 'merma') === kind).reduce((s, m) => s + (m.costValue || 0), 0)
+  const merma = lossOf('merma'), regalo = lossOf('regalo'), conteo = lossOf('conteo')
+
+  const mp = sumBy('mercadopago')
+  const result = salesTotal - purchasesTotal - expenses
+  return {
+    sales: {
+      total: salesTotal, cash: sumBy('cash'), transfer: sumBy('transfer'), mercadopago: mp, count: tx.length,
+      transferUnverified: tx.filter(t => t.type === 'transfer' && t.verified === false).length,
+    },
+    discountsGiven,
+    purchases: { total: purchasesTotal, paid: purchasesPaid, pending: purchasesTotal - purchasesPaid },
+    expenses, withdrawals,
+    losses: { merma, regalo, conteo, total: merma + regalo + conteo },
+    result,
+    afterWithdrawals: result - withdrawals,
+    electronicReference: Math.round(mp * 0.015),
+  }
 }

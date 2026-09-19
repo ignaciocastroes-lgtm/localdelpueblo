@@ -16,12 +16,14 @@ import {
   formatCLP,
   calculateCartItemTotal
 } from '@/lib/store'
+import { SafeImage } from '@/components/safe-image'
 
 interface ProductCustomizerProps {
   product: Product
   open: boolean
   onClose: () => void
   onAddToCart: (product: Product, quantity: number, modifiers: CartItemModifier[]) => void
+  disabledModifierIds?: string[]   // opciones que hoy no hay (el administrador las apaga)
 }
 
 function useMediaQuery(query: string): boolean {
@@ -39,17 +41,19 @@ function useMediaQuery(query: string): boolean {
   return matches
 }
 
-export function ProductCustomizer({ product, open, onClose, onAddToCart }: ProductCustomizerProps) {
+export function ProductCustomizer({ product, open, onClose, onAddToCart, disabledModifierIds = [] }: ProductCustomizerProps) {
   const [quantity, setQuantity] = useState(1)
   const [selectedModifiers, setSelectedModifiers] = useState<CartItemModifier[]>([])
   const isMobile = useMediaQuery('(max-width: 768px)')
 
   const modifierGroups = useMemo(() => {
     if (!product.modifierGroups) return []
-    return product.modifierGroups
+    return (product.modifierGroups
       .map(id => getModifierGroupById(id))
-      .filter(Boolean) as { id: string; name: string; modifiers: Modifier[] }[]
-  }, [product.modifierGroups])
+      .filter(Boolean) as { id: string; name: string; modifiers: Modifier[] }[])
+      // Opciones apagadas hoy (ej. "Piña" si no hay): no se ofrecen
+      .map(g => ({ ...g, modifiers: g.modifiers.filter(m => !disabledModifierIds.includes(m.id)) }))
+  }, [product.modifierGroups, disabledModifierIds])
 
   const addonsGroup = modifierGroups.filter(g => g.modifiers.some(m => m.type === 'addon'))
   const exclusionsGroup = modifierGroups.filter(g => g.modifiers.some(m => m.type === 'exclusion'))
@@ -91,10 +95,11 @@ export function ProductCustomizer({ product, open, onClose, onAddToCart }: Produ
       {/* Product Image */}
       {product.image && (
         <div className="relative h-32 md:h-40 rounded-xl overflow-hidden">
-          <img 
-            src={product.image} 
+          <SafeImage
+            src={product.image}
             alt={product.name}
             className="w-full h-full object-cover"
+            fallback={null}
           />
           <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
           <div className="absolute bottom-3 left-3">

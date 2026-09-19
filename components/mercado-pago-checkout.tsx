@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { Progress } from '@/components/ui/progress'
 import { formatCLP } from '@/lib/store'
+import { toast } from 'sonner'
 
 type PaymentState = 'generating' | 'waiting' | 'processing' | 'success' | 'failed'
 
@@ -23,6 +24,8 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
   const [isDemoMode, setIsDemoMode] = useState(false)
   const [qrImageUrl, setQrImageUrl] = useState<string | null>(null)
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const externalRefRef = useRef<string>('')
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -33,10 +36,12 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
     }
   }
 
-  // Al abrir: intenta crear un cobro REAL contra Mercado Pago.
-  // Si el servidor no tiene MP_ACCESS_TOKEN configurado (o falla la
-  // conexión), cae a Modo Demo para que el kiosko no se detenga mientras
-  // se termina de configurar Vercel.
+  // Al abrir (o al reintentar): intenta crear un cobro REAL contra Mercado Pago.
+  //
+  // Si el servidor dice que Mercado Pago no está configurado (falta MP_ACCESS_TOKEN) se muestra
+  // un aviso y se cierra. Cualquier otro fallo (sin internet, MP caído, rechazo) termina en
+  // "no se pudo generar el cobro". En ningún caso hay botones de simulación: si no, una venta
+  // podría quedar como pagada sin que haya entrado un peso.
   useEffect(() => {
     if (!open) {
       setPaymentState('generating')
@@ -45,12 +50,24 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
       setIsDemoMode(false)
       setQrImageUrl(null)
       setCheckoutUrl(null)
+      setErrorMsg(null)
+      setAttempt(0)
       stopPolling()
       return
     }
 
     let cancelled = false
     externalRefRef.current = `venta-${Date.now()}`
+
+    // Estado limpio en cada intento (también en "Reintentar")
+    setPaymentState('generating')
+    setCountdown(120)
+    setSimulateResult(null)
+    setIsDemoMode(false)
+    setQrImageUrl(null)
+    setCheckoutUrl(null)
+    setErrorMsg(null)
+    stopPolling()
 
     const crearCobro = async () => {
       try {
@@ -64,7 +81,21 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
           }),
         })
 
-        if (!res.ok) throw new Error('MP no configurado o rechazó la solicitud')
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          if (cancelled) return
+          if (body?.code === 'MP_NOT_CONFIGURED') {
+            // Sin credenciales NO hay "modo demo": se avisa y se cierra, para que nadie
+            // registre como pagada una venta que no cobró Mercado Pago.
+            toast.error('Mercado Pago no está configurado (falta MP_ACCESS_TOKEN en Vercel). Cobra en efectivo o por transferencia y avisa al administrador.', { duration: 10000 })
+            onClose()
+          } else {
+            setErrorMsg('Mercado Pago rechazó la solicitud. Intenta de nuevo o cobra en efectivo.')
+            setPaymentState('failed')
+          }
+          return
+        }
+
         const data = await res.json()
         if (cancelled) return
 
@@ -74,10 +105,9 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
         setPaymentState('waiting')
         startPolling()
       } catch {
-        // Fallback: Modo Demo (sin conexión real a Mercado Pago)
         if (cancelled) return
-        setIsDemoMode(true)
-        setTimeout(() => { if (!cancelled) setPaymentState('waiting') }, 1500)
+        setErrorMsg('No hay conexión con Mercado Pago. Revisa el internet de la tablet o cobra en efectivo.')
+        setPaymentState('failed')
       }
     }
 
@@ -104,7 +134,7 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
     crearCobro()
 
     return () => { cancelled = true; stopPolling() }
-  }, [open, amount])
+  }, [open, amount, attempt])
 
   useEffect(() => {
     if (paymentState !== 'waiting') return
@@ -146,14 +176,9 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
     onClose()
   }
 
+  // Reintentar = generar un cobro NUEVO (el QR anterior ya expiró o falló).
   const handleRetry = () => {
-    setPaymentState('generating')
-    setCountdown(120)
-    setSimulateResult(null)
-
-    setTimeout(() => {
-      setPaymentState('waiting')
-    }, 1500)
+    setAttempt(a => a + 1)
   }
 
   const formatTime = (seconds: number) => {
@@ -181,13 +206,6 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
             </div>
           </div>
         </div>
-
-        {isDemoMode && paymentState !== 'generating' && (
-          <div className="flex items-center gap-2 bg-amber-100 text-amber-800 text-xs font-medium px-3 py-2 rounded-lg mt-4">
-            <FlaskConical className="w-4 h-4 flex-shrink-0" />
-            Modo Demo: no hay cobro real. Configura MP_ACCESS_TOKEN en Vercel para cobrar de verdad.
-          </div>
-        )}
 
         <div className="py-6">
           {/* Generating State */}
@@ -252,36 +270,9 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
                 <Progress value={(countdown / 120) * 100} className="h-2" />
               </div>
 
-              {/* Simulation Buttons: solo en Modo Demo */}
-              {isDemoMode && (
-                <div className="pt-4 border-t space-y-2">
-                  <p className="text-xs text-muted-foreground mb-2">Simular resultado (solo demo):</p>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      className="flex-1 border-green-500 text-green-600 hover:bg-green-50"
-                      onClick={() => setSimulateResult('success')}
-                    >
-                      <CheckCircle2 className="w-4 h-4 mr-2" />
-                      Pago Exitoso
-                    </Button>
-                    <Button
-                      variant="outline"
-                      className="flex-1 border-red-500 text-red-600 hover:bg-red-50"
-                      onClick={() => setSimulateResult('failed')}
-                    >
-                      <XCircle className="w-4 h-4 mr-2" />
-                      Pago Fallido
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              {!isDemoMode && (
-                <p className="text-xs text-muted-foreground pt-2 border-t">
-                  El cobro se confirma automáticamente apenas el cliente paga. No hace falta apretar nada.
-                </p>
-              )}
+              <p className="text-xs text-muted-foreground pt-2 border-t">
+                El cobro se confirma automáticamente apenas el cliente paga. No hace falta apretar nada.
+              </p>
             </div>
           )}
 
@@ -311,7 +302,7 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
                 </p>
               </div>
               <div className="bg-green-50 rounded-lg p-4 text-sm text-green-800">
-                <p className="font-medium">{isDemoMode ? 'Simulación de comprobante' : 'Comprobante enviado al correo'}</p>
+                <p className="font-medium">Pago verificado en Mercado Pago</p>
                 <p className="text-green-600 mt-1">Ref: {externalRefRef.current}</p>
               </div>
               <Button
@@ -330,13 +321,15 @@ export function MercadoPagoCheckout({ open, onClose, amount, onPaymentComplete }
                 <XCircle className="w-14 h-14 text-red-600" />
               </div>
               <div>
-                <h3 className="font-bold text-2xl text-red-600">Pago Rechazado</h3>
+                <h3 className="font-bold text-2xl text-red-600">
+                  {errorMsg ? 'No se pudo generar el cobro' : 'Pago no completado'}
+                </h3>
                 <p className="text-muted-foreground mt-2">
-                  No se pudo procesar el pago. Intenta nuevamente.
+                  No se registró ninguna venta. Puedes reintentar o cobrar de otra forma.
                 </p>
               </div>
               <div className="bg-red-50 rounded-lg p-4 text-sm text-red-800">
-                <p>El código QR ha expirado o el pago fue rechazado.</p>
+                <p>{errorMsg || 'El código QR expiró o el pago fue rechazado.'}</p>
               </div>
               <div className="flex gap-2">
                 <Button

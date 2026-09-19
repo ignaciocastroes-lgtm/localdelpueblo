@@ -33,7 +33,12 @@ export async function GET() {
       if (res.ok) {
         const data = await res.json()
         result.mercadoPago.valido = true
-        result.mercadoPago.detalle = `Token válido. Cuenta: ${data.email || data.nickname || data.id}`
+        // Esta ruta es pública: no se devuelve el correo completo de la cuenta.
+        const email: string | undefined = data.email
+        const cuenta = email && email.includes('@')
+          ? `${email[0]}***@${email.split('@')[1]}`
+          : (data.nickname || 'cuenta verificada')
+        result.mercadoPago.detalle = `Token válido. Cuenta: ${cuenta}`
       } else {
         result.mercadoPago.detalle = 'El token no fue aceptado por Mercado Pago (revisa que sea el de PRODUCCIÓN, no el de prueba).'
       }

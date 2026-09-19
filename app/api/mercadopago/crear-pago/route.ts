@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { rejectForeignOrigin } from '@/lib/api-guard'
 
 // Crea una preferencia de pago real en Mercado Pago (Checkout Pro).
 // El access token es secreto y solo vive en el servidor (Vercel env vars):
@@ -8,21 +9,43 @@ import { NextRequest, NextResponse } from 'next/server'
 // El tablet nunca ve este token: solo llama a esta ruta y recibe de vuelta
 // un link de pago, que se transforma en QR para mostrar al cliente.
 
+// Tope de seguridad por cobro: evita que un monto mal tipeado (o una llamada
+// externa) genere un link de pago absurdo.
+const MONTO_MAXIMO = 5_000_000
+
 export async function POST(request: NextRequest) {
+  const blocked = rejectForeignOrigin(request)
+  if (blocked) return blocked
+
   const accessToken = process.env.MP_ACCESS_TOKEN
 
   if (!accessToken) {
     return NextResponse.json(
-      { error: 'MP_ACCESS_TOKEN no está configurado en las variables de entorno de Vercel.' },
+      {
+        code: 'MP_NOT_CONFIGURED',
+        error: 'MP_ACCESS_TOKEN no está configurado en las variables de entorno de Vercel.',
+      },
       { status: 500 }
     )
   }
 
-  const { amount, description, externalReference } = await request.json()
+  let body: any
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Cuerpo de la petición inválido' }, { status: 400 })
+  }
 
-  if (!amount || amount <= 0) {
+  const amount = Number(body?.amount)
+  if (!Number.isFinite(amount) || amount <= 0 || amount > MONTO_MAXIMO) {
     return NextResponse.json({ error: 'Monto inválido' }, { status: 400 })
   }
+
+  const description = typeof body?.description === 'string' ? body.description.slice(0, 120) : ''
+  const externalReference =
+    typeof body?.externalReference === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(body.externalReference)
+      ? body.externalReference
+      : `venta-${Date.now()}`
 
   const montoRedondeado = Math.round(amount)
 

@@ -3,7 +3,7 @@
 import { useState, useMemo } from 'react'
 import {
   Search, Plus, Minus, ShoppingCart, Trash2, Banknote, QrCode, X,
-  Apple, Carrot, Salad, CupSoda, Package, Scale, Percent, ChefHat, Coins
+  Apple, Carrot, Salad, CupSoda, Package, Scale, Percent, ChefHat, Coins, Landmark
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,8 +15,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { toast } from 'sonner'
 import { ProductCustomizer } from '@/components/product-customizer'
 import { MercadoPagoCheckout } from '@/components/mercado-pago-checkout'
+import { SafeImage } from '@/components/safe-image'
+import { TransferDialog, type TransferMeta } from '@/components/transfer-dialog'
 import {
-  formatCLP, formatWeight, calculateCartItemTotal, applyItemDiscount,
+  formatCLP, formatWeight, calculateCartItemTotal, cartLineTotal,
   roundToNearestTen, estimateGramsForAmount,
   type Product, type ProductCategory, type CartItem, type CartItemModifier, type CartItemDiscount
 } from '@/lib/store'
@@ -42,8 +44,9 @@ function getProductIcon(product: Product): React.ReactNode {
 const categories: ProductCategory[] = ['Frutas', 'Verduras', 'Ensaladas y Preparados', 'Jugos Naturales', 'Otros']
 
 const DISCOUNT_PRESETS: { label: string; discount: CartItemDiscount }[] = [
-  { label: '3x2 (-33%)', discount: { type: 'percent', value: 33, label: '3x2' } },
-  { label: '2x1 (-50%)', discount: { type: 'percent', value: 50, label: '2x1' } },
+  // Promos "lleva N paga M": solo rebajan los grupos completos (3x2 con 4 unidades paga 3).
+  { label: '3x2', discount: { type: 'bundle', value: 0, buy: 3, pay: 2, label: '3x2' } },
+  { label: '2x1', discount: { type: 'bundle', value: 0, buy: 2, pay: 1, label: '2x1' } },
   { label: '-20%', discount: { type: 'percent', value: 20, label: '-20%' } },
   { label: '-30%', discount: { type: 'percent', value: 30, label: '-30%' } },
   { label: '-50%', discount: { type: 'percent', value: 50, label: '-50%' } },
@@ -51,11 +54,12 @@ const DISCOUNT_PRESETS: { label: string; discount: CartItemDiscount }[] = [
 
 interface POSTerminalProps {
   products: Product[]
-  onSaleComplete?: (items: CartItem[], type: 'cash' | 'mercadopago', total: number) => void
+  onSaleComplete?: (items: CartItem[], type: 'cash' | 'transfer' | 'mercadopago', total: number, meta?: TransferMeta) => void
+  disabledModifierIds?: string[]   // opciones apagadas hoy (ej. sabor de jugo)
   currentShift?: string
 }
 
-export function POSTerminal({ products, onSaleComplete, currentShift }: POSTerminalProps) {
+export function POSTerminal({ products, onSaleComplete, currentShift, disabledModifierIds }: POSTerminalProps) {
   const [cart, setCart] = useState<CartItem[]>([])
   const [selectedCategory, setSelectedCategory] = useState<ProductCategory | 'Todos'>('Todos')
   const [searchQuery, setSearchQuery] = useState('')
@@ -72,9 +76,16 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
   // Descuento manual sobre un ítem del carrito
   const [discountingIndex, setDiscountingIndex] = useState<number | null>(null)
   const [customDiscountPercent, setCustomDiscountPercent] = useState('')
+  const [remateInput, setRemateInput] = useState('')
 
-  // Mercado Pago
+  // Mercado Pago y transferencia
   const [showMercadoPago, setShowMercadoPago] = useState(false)
+  const [showTransfer, setShowTransfer] = useState(false)
+
+  // Producto apagado o sin stock registrado: el vendedor puede venderlo igual si ve que hay
+  // (y se anota). Se reinicia al terminar cada venta.
+  const [pendingOverride, setPendingOverride] = useState<Product | null>(null)
+  const [overrideIds, setOverrideIds] = useState<Set<string>>(new Set())
 
   const filteredProducts = useMemo(() => {
     return products.filter(product => {
@@ -86,11 +97,11 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
     })
   }, [products, selectedCategory, searchQuery])
 
-  // Precio final de un ítem (después de su descuento manual, si tiene)
-  const getItemUnitPrice = (item: CartItem) => applyItemDiscount(item.itemTotal, item.discount)
+  // Total de una línea del carrito (cantidad × precio, con su descuento; las promos 3x2/2x1 dependen de la cantidad)
+  const getLineTotal = (item: CartItem) => cartLineTotal(item)
 
   const cartTotal = useMemo(() => {
-    return cart.reduce((sum, item) => sum + getItemUnitPrice(item) * item.quantity, 0)
+    return cart.reduce((sum, item) => sum + getLineTotal(item), 0)
   }, [cart])
 
   const cartTotalRoundedCash = roundToNearestTen(cartTotal)
@@ -102,7 +113,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
     return Math.max(0, product.stock - inCart)
   }
 
-  const handleProductClick = (product: Product) => {
+  const openProduct = (product: Product) => {
     if (product.saleType === 'peso') {
       setWeighingProduct(product)
       setWeighMode('pesar')
@@ -114,11 +125,25 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
       setCustomizingProduct(product)
       return
     }
-    if (stockRemaining(product) <= 0) {
-      toast.error(`No queda stock de "${product.name}".`)
+    addToCart(product, 1, [])
+  }
+
+  const handleProductClick = (product: Product) => {
+    const apagado = product.availableToday === false
+    const sinStock = stockRemaining(product) <= 0
+    if ((apagado || sinStock) && !overrideIds.has(product.id)) {
+      setPendingOverride(product)   // "está apagado / sin stock: ¿vender igual?"
       return
     }
-    addToCart(product, 1, [])
+    openProduct(product)
+  }
+
+  const confirmOverride = () => {
+    if (!pendingOverride) return
+    const product = pendingOverride
+    setOverrideIds(prev => new Set(prev).add(product.id))
+    setPendingOverride(null)
+    openProduct(product)
   }
 
   const addToCart = (product: Product, quantity: number, modifiers: CartItemModifier[], extra?: { saleMode?: 'pesar' | 'monto'; weightGrams?: number; amountOverride?: number }) => {
@@ -160,7 +185,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
         toast.error(`El mínimo de venta para "${product.name}" es ${formatWeight(product.minGrams)}.`)
         return
       }
-      if (grams > stockRemaining(product)) {
+      if (grams > stockRemaining(product) && !overrideIds.has(product.id)) {
         toast.error(`Solo quedan ${formatWeight(stockRemaining(product))} de "${product.name}".`)
         return
       }
@@ -168,7 +193,15 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
     } else {
       const amount = parseInt(weighAmountInput) || 0
       if (amount <= 0) { toast.error('Ingresa un monto válido.'); return }
-      addToCart(product, 1, [], { saleMode: 'monto', amountOverride: amount })
+      // El precio es el monto pedido, pero el stock SÍ debe bajar: se descuenta el
+      // peso estimado (monto ÷ precio por kilo). Antes las ventas "por monto" no
+      // descontaban nada y el inventario quedaba inflado.
+      const estimatedGrams = Math.round(estimateGramsForAmount(product, amount))
+      if (estimatedGrams > stockRemaining(product) && !overrideIds.has(product.id)) {
+        toast.error(`Solo quedan ${formatWeight(stockRemaining(product))} de "${product.name}" (ese monto son ~${formatWeight(estimatedGrams)}).`)
+        return
+      }
+      addToCart(product, 1, [], { saleMode: 'monto', amountOverride: amount, weightGrams: estimatedGrams })
     }
 
     setWeighingProduct(null)
@@ -180,12 +213,18 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
       if (item.product.saleType === 'peso') return prev // no aplica stepper a ítems pesados
       const newQuantity = item.quantity + delta
       if (newQuantity <= 0) return prev.filter((_, i) => i !== index)
-      if (delta > 0 && newQuantity > item.product.stock) {
-        toast.error(`Solo quedan ${item.product.stock} unidades de "${item.product.name}".`)
-        return prev
+      if (delta > 0) {
+        const enOtrasLineas = prev.reduce((sum, i, idx) => idx !== index && i.product.id === item.product.id ? sum + i.quantity : sum, 0)
+        if (enOtrasLineas + newQuantity > item.product.stock && !overrideIds.has(item.product.id)) {
+          toast.error(`Solo quedan ${item.product.stock} unidades de "${item.product.name}".`)
+          return prev
+        }
       }
       const updated = [...prev]
-      updated[index] = { ...updated[index], quantity: newQuantity }
+      // Un remate fija el precio final de la línea: si cambia la cantidad, ya no corresponde.
+      const conRemate = updated[index].discount?.type === 'total'
+      updated[index] = { ...updated[index], quantity: newQuantity, ...(conRemate ? { discount: undefined } : {}) }
+      if (conRemate) toast.info('Cambiaste la cantidad: se quitó el remate de esa línea.')
       return updated
     })
   }
@@ -204,17 +243,22 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
     setCustomDiscountPercent('')
   }
 
-  const handleCheckout = (type: 'cash' | 'mercadopago') => {
+  const handleCheckout = (type: 'cash' | 'transfer' | 'mercadopago') => {
     if (type === 'mercadopago') {
       setShowMercadoPago(true)
+      return
+    }
+    if (type === 'transfer') {
+      setShowTransfer(true)
       return
     }
     completeSale('cash', cartTotalRoundedCash)
   }
 
-  const completeSale = (type: 'cash' | 'mercadopago', total: number) => {
-    onSaleComplete?.(cart, type, total)
+  const completeSale = (type: 'cash' | 'transfer' | 'mercadopago', total: number, meta?: TransferMeta) => {
+    onSaleComplete?.(cart, type, total, meta)
     setCart([])
+    setOverrideIds(new Set())
   }
 
   const handleMercadoPagoComplete = (success: boolean) => {
@@ -226,7 +270,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
     const parts: string[] = []
     if (item.product.saleType === 'peso') {
       if (item.saleMode === 'pesar' && item.weightGrams) parts.push(formatWeight(item.weightGrams))
-      if (item.saleMode === 'monto') parts.push('Por monto pedido')
+      if (item.saleMode === 'monto') parts.push(`Por monto pedido${item.weightGrams ? ` (~${formatWeight(item.weightGrams)})` : ''}`)
     }
     if (item.modifiers.length > 0) {
       const addons = item.modifiers.filter(m => m.type === 'addon').map(m => `+${m.modifier.name}`)
@@ -245,9 +289,9 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 h-full">
+    <div className="grid grid-cols-1 lg:grid-cols-3 lg:grid-rows-1 gap-4 lg:h-full lg:min-h-0">
       {/* Products Grid */}
-      <div className="lg:col-span-2 flex flex-col gap-4">
+      <div className="lg:col-span-2 flex flex-col gap-4 lg:min-h-0">
         <div className="flex flex-col gap-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -282,7 +326,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
           </div>
         </div>
 
-        <ScrollArea className="flex-1">
+        <ScrollArea className="flex-1 min-h-0">
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             {filteredProducts.map(product => {
               const remaining = stockRemaining(product)
@@ -294,18 +338,16 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
                   onClick={() => handleProductClick(product)}
                 >
                   <div className="relative aspect-[4/3] bg-muted overflow-hidden flex items-center justify-center">
-                    {product.image ? (
-                      /* eslint-disable-next-line @next/next/no-img-element */
-                      <img
-                        src={product.image}
-                        alt={product.name}
-                        className="w-full h-full object-cover transition-transform group-hover:scale-105"
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center text-muted-foreground/50">
-                        {getProductIcon(product)}
-                      </div>
-                    )}
+                    <SafeImage
+                      src={product.image}
+                      alt={product.name}
+                      className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                      fallback={
+                        <div className="flex flex-col items-center text-muted-foreground/50">
+                          {getProductIcon(product)}
+                        </div>
+                      }
+                    />
 
                     {product.saleType === 'peso' && (
                       <Badge className="absolute top-2 right-2 bg-accent text-accent-foreground shadow-md gap-1">
@@ -317,9 +359,11 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
                         <ChefHat className="w-3 h-3" />
                       </Badge>
                     )}
-                    {sinStock && (
-                      <div className="absolute inset-0 bg-background/80 flex items-center justify-center backdrop-blur-sm">
-                        <Badge variant="destructive" className="text-sm font-bold shadow-lg">AGOTADO</Badge>
+                    {(sinStock || product.availableToday === false) && (
+                      <div className="absolute inset-0 bg-background/70 flex items-center justify-center backdrop-blur-[1px]">
+                        <Badge variant={product.availableToday === false ? 'secondary' : 'destructive'} className="text-sm font-bold shadow-lg">
+                          {product.availableToday === false ? 'NO HAY HOY' : 'AGOTADO'}
+                        </Badge>
                       </div>
                     )}
                   </div>
@@ -342,7 +386,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
       </div>
 
       {/* Cart */}
-      <Card className="flex flex-col h-full">
+      <Card className="flex flex-col lg:h-full lg:min-h-0">
         <div className="p-4 pb-0">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -357,7 +401,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
 
         <Separator className="my-3" />
 
-        <div className="flex-1 overflow-hidden px-4">
+        <div className="flex-1 min-h-0 overflow-hidden px-4">
           <ScrollArea className="h-full">
             {cart.length === 0 ? (
               <div className="text-center text-muted-foreground py-8">
@@ -371,12 +415,12 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
                   <div key={index} className="p-3 bg-secondary/30 rounded-lg border border-border/50">
                     <div className="flex items-start gap-3">
                       <div className="w-12 h-12 shrink-0 bg-muted rounded-md overflow-hidden flex items-center justify-center border border-border/50">
-                        {item.product.image ? (
-                          /* eslint-disable-next-line @next/next/no-img-element */
-                          <img src={item.product.image} alt={item.product.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <span className="text-muted-foreground/50 [&>svg]:w-5 [&>svg]:h-5">{getProductIcon(item.product)}</span>
-                        )}
+                        <SafeImage
+                          src={item.product.image}
+                          alt={item.product.name}
+                          className="w-full h-full object-cover"
+                          fallback={<span className="text-muted-foreground/50 [&>svg]:w-5 [&>svg]:h-5">{getProductIcon(item.product)}</span>}
+                        />
                       </div>
 
                       <div className="flex-1 min-w-0">
@@ -388,7 +432,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
                         )}
                         <div className="flex items-center gap-2 mt-1">
                           <p className="text-sm text-primary font-bold">
-                            {formatCLP(getItemUnitPrice(item) * item.quantity)}
+                            {formatCLP(getLineTotal(item))}
                           </p>
                           <button
                             className="text-xs text-muted-foreground underline flex items-center gap-0.5"
@@ -435,7 +479,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
             </p>
           )}
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <Button
               variant="outline"
               className="flex-col h-16 gap-1 text-base border-2"
@@ -444,6 +488,15 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
             >
               <Banknote className="w-6 h-6 text-green-600" />
               <span className="text-xs font-medium">Efectivo</span>
+            </Button>
+            <Button
+              variant="outline"
+              className="flex-col h-16 gap-1 text-base border-2"
+              disabled={cart.length === 0}
+              onClick={() => handleCheckout('transfer')}
+            >
+              <Landmark className="w-6 h-6 text-emerald-700" />
+              <span className="text-xs font-medium">Transferencia</span>
             </Button>
             <Button
               className="flex-col h-16 gap-1 text-base bg-[#009EE3] hover:bg-[#008ACC]"
@@ -529,10 +582,47 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
           </DialogHeader>
           <div className="grid grid-cols-2 gap-2">
             {DISCOUNT_PRESETS.map(preset => (
-              <Button key={preset.label} variant="outline" onClick={() => discountingIndex !== null && applyDiscountToItem(discountingIndex, preset.discount)}>
+              <Button
+                key={preset.label}
+                variant="outline"
+                disabled={preset.discount.type === 'bundle' && (discountingIndex === null || (cart[discountingIndex]?.quantity ?? 0) < (preset.discount.buy ?? 0))}
+                onClick={() => discountingIndex !== null && applyDiscountToItem(discountingIndex, preset.discount)}
+              >
                 {preset.label}
+                {preset.discount.type === 'bundle' && <span className="ml-1 text-[10px] text-muted-foreground">(desde {preset.discount.buy} un.)</span>}
               </Button>
             ))}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant="outline" onClick={() => discountingIndex !== null && applyDiscountToItem(discountingIndex, { type: 'percent', value: 100, label: 'Regalo' })}>
+              🎁 Regalo (gratis)
+            </Button>
+          </div>
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <label className="text-xs text-muted-foreground">Remate: precio final de la línea ($)</label>
+              <Input
+                type="number"
+                inputMode="numeric"
+                value={remateInput}
+                onChange={(e) => setRemateInput(e.target.value)}
+                placeholder="Ej: 2000"
+              />
+            </div>
+            <Button
+              onClick={() => {
+                if (discountingIndex === null) return
+                const price = Math.round(Number(remateInput))
+                const item = cart[discountingIndex]
+                const lista = item ? item.itemTotal * item.quantity : 0
+                if (!Number.isFinite(price) || price < 0) { toast.error('Ingresa un precio válido.'); return }
+                if (price > lista) { toast.error(`El remate no puede superar el precio normal (${formatCLP(lista)}).`); return }
+                applyDiscountToItem(discountingIndex, { type: 'total', value: price, label: 'Remate' })
+                setRemateInput('')
+              }}
+            >
+              Rematar
+            </Button>
           </div>
           <div className="flex items-end gap-2">
             <div className="flex-1">
@@ -546,7 +636,12 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
               />
             </div>
             <Button
-              onClick={() => discountingIndex !== null && applyDiscountToItem(discountingIndex, { type: 'percent', value: parseInt(customDiscountPercent) || 0 })}
+              onClick={() => {
+                if (discountingIndex === null) return
+                const pct = parseInt(customDiscountPercent)
+                if (!Number.isFinite(pct) || pct < 1 || pct > 100) { toast.error('El descuento debe estar entre 1% y 100%.'); return }
+                applyDiscountToItem(discountingIndex, { type: 'percent', value: pct })
+              }}
             >
               Aplicar
             </Button>
@@ -559,6 +654,30 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
         </DialogContent>
       </Dialog>
 
+      {/* Producto apagado o sin stock: vender igual y anotarlo */}
+      <Dialog open={!!pendingOverride} onOpenChange={(o) => !o && setPendingOverride(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{pendingOverride?.availableToday === false ? 'Hoy no hay este producto' : 'Sin stock registrado'}</DialogTitle>
+            <DialogDescription>
+              «{pendingOverride?.name}» figura {pendingOverride?.availableToday === false ? 'apagado hoy' : 'agotado'}. Si ves que hay y te lo piden, puedes venderlo igual:
+              la venta queda anotada y el stock se corrige en el conteo del cierre.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingOverride(null)}>No vender</Button>
+            <Button onClick={confirmOverride}>Vender igual</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <TransferDialog
+        open={showTransfer}
+        total={cartTotal}
+        onClose={() => setShowTransfer(false)}
+        onConfirm={(meta) => { setShowTransfer(false); completeSale('transfer', cartTotal, meta) }}
+      />
+
       {/* Product Customizer (jugos, etc.) */}
       {customizingProduct && (
         <ProductCustomizer
@@ -566,6 +685,7 @@ export function POSTerminal({ products, onSaleComplete, currentShift }: POSTermi
           open={!!customizingProduct}
           onClose={() => setCustomizingProduct(null)}
           onAddToCart={addToCart}
+          disabledModifierIds={disabledModifierIds}
         />
       )}
 

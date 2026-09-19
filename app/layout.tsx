@@ -8,14 +8,14 @@ const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: 'Club de Hockey Internacional de Lo Espejo - Sistema de Gestión',
-  description: 'Sistema de gestión de minimarket y socios para el Club de Hockey Internacional de Lo Espejo',
+  title: 'El Puesto del Pueblo - Sistema de venta',
+  description: 'Sistema de venta para el puesto de frutas y verduras en la feria',
   generator: 'v0.app',
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'Kiosko',
+    title: 'El Puesto',
   },
   icons: {
     icon: [
@@ -52,7 +52,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="es" suppressHydrationWarning>
       <body className="font-sans antialiased">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
           {children}

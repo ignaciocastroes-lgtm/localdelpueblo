@@ -13,6 +13,8 @@ import { Separator } from '@/components/ui/separator'
 import { FieldGroup, Field, FieldLabel } from '@/components/ui/field'
 import { type Product, type ProductCategory, type ProductTemplate, type SaleType, formatCLP, productTemplates, getPhotoGallery, saveToPhotoGallery, type GalleryEntry } from '@/lib/store'
 import { toast } from 'sonner' // Añadido para notificaciones de error de imagen
+import { compressImageFile } from '@/lib/image-utils'
+import { PhotoFinder } from '@/components/photo-finder'
 
 interface ExtendedProduct extends Product {
   costPrice?: number
@@ -27,6 +29,8 @@ interface ProductEditorProps {
   product?: ExtendedProduct | null
   onSave: (product: ExtendedProduct, requiresOverride: boolean, overrideReason?: string) => void
   onDelete?: (productId: string) => void
+  // Modo "revisar mi catálogo": muestra el avance y permite saltar al siguiente producto
+  setup?: { index: number; total: number; onSkip: () => void }
 }
 
 const categories: ProductCategory[] = ['Frutas', 'Verduras', 'Ensaladas y Preparados', 'Jugos Naturales', 'Otros']
@@ -38,7 +42,7 @@ const saleTypes: { value: SaleType; label: string; hint: string }[] = [
   { value: 'preparado', label: 'Preparado', hint: 'Se arma al momento con variantes (ej. jugo natural)' },
 ]
 
-export function ProductEditor({ open, onClose, product, onSave, onDelete }: ProductEditorProps) {
+export function ProductEditor({ open, onClose, product, onSave, onDelete, setup }: ProductEditorProps) {
   const [formData, setFormData] = useState<ExtendedProduct>({
     id: '',
     name: '',
@@ -63,6 +67,9 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
   const [fuenteEncontrada, setFuenteEncontrada] = useState<string | null>(null)
   const [showTemplates, setShowTemplates] = useState(false)
   const [showGalleryPicker, setShowGalleryPicker] = useState(false)
+  const [showPhotoFinder, setShowPhotoFinder] = useState(false)
+  const [stockText, setStockText] = useState('')
+  const [minStockText, setMinStockText] = useState('')
   const [gallery, setGallery] = useState<GalleryEntry[]>([])
   const [saveNewPhotoToGallery, setSaveNewPhotoToGallery] = useState(true)
   const [imageIsFromGallery, setImageIsFromGallery] = useState(false)
@@ -92,7 +99,7 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
   }
 
   const pickFromGallery = (entry: GalleryEntry) => {
-    setFormData(prev => ({ ...prev, image: entry.image }))
+    setFormData(prev => ({ ...prev, image: entry.image, imageCredit: entry.credit }))
     setImageIsFromGallery(true)
     setShowGalleryPicker(false)
   }
@@ -130,6 +137,16 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
   }
 
   const isEditing = !!product
+  const isPeso = formData.saleType === 'peso'
+
+  // En productos por peso el stock se ESCRIBE en kilos (20 = 20 kg) y se guarda en gramos.
+  // Antes el campo no tenía unidad: escribir "20" dejaba 20 g de stock.
+  const stockToText = (value: number, peso: boolean) => String(peso ? Math.round(value) / 1000 : value)
+  const textToStock = (text: string, peso: boolean) => {
+    const n = Number(text.replace(',', '.'))
+    if (!Number.isFinite(n) || n < 0) return 0
+    return peso ? Math.round(n * 1000) : Math.round(n)
+  }
 
   useEffect(() => {
     if (product) {
@@ -142,6 +159,8 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
         description: product.description || '',
         barcode: product.barcode || '',
       })
+      setStockText(stockToText(product.stock, product.saleType === 'peso'))
+      setMinStockText(stockToText(product.minStock || 5, product.saleType === 'peso'))
     } else {
       setFormData({
         id: `new-${Date.now()}`,
@@ -160,6 +179,8 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
         visibleInPOS: true,
         customizable: false,
       })
+      setStockText('0')
+      setMinStockText('5')
     }
   }, [product, open])
 
@@ -177,19 +198,32 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
       return
     }
 
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      setFormData(prev => ({ ...prev, image: reader.result as string }))
-      setImageIsFromGallery(false)
-      setSaveNewPhotoToGallery(true)
-    }
-    reader.readAsDataURL(file)
+    // Se reduce la foto antes de guardarla: una foto de cámara pesa varios MB y
+    // llena la memoria de la tablet (ver lib/image-utils.ts).
+    compressImageFile(file)
+      .then((dataUrl) => {
+        setFormData(prev => ({ ...prev, image: dataUrl, imageCredit: undefined }))
+        setImageIsFromGallery(false)
+        setSaveNewPhotoToGallery(true)
+      })
+      .catch(() => toast.error('No se pudo procesar la foto. Prueba con otra imagen.'))
 
     // Limpiar el input para permitir seleccionar la misma imagen de nuevo si se borra
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const handleSave = () => {
+    // Validación mínima: un producto sin nombre, a $0 o con stock negativo se
+    // vendería mal (o gratis) y ensucia el cierre de caja.
+    if (!formData.name?.trim()) { toast.error('El producto necesita un nombre'); return }
+    if (formData.saleType === 'peso') {
+      if (!Number.isFinite(formData.pricePerKg) || (formData.pricePerKg || 0) <= 0) { toast.error('El precio por kilo debe ser mayor a $0'); return }
+    } else if (!Number.isFinite(formData.price) || formData.price <= 0) {
+      toast.error('El precio de venta debe ser mayor a $0'); return
+    }
+    if (!Number.isFinite(formData.stock) || formData.stock < 0) { toast.error('El stock no puede ser negativo'); return }
+    if (formData.costPrice !== undefined && (!Number.isFinite(formData.costPrice) || formData.costPrice < 0)) { toast.error('El costo no puede ser negativo'); return }
+
     let requiresOverride = false
     let overrideReason = ''
 
@@ -217,12 +251,13 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
       }
     }
 
-    onSave(formData, requiresOverride, overrideReason)
+    if (!isEditing && !formData.image) toast.warning('Este producto quedó sin foto. Puedes tomarla después desde ✏️ Editar.')
+    onSave({ ...formData, name: formData.name.trim() }, requiresOverride, overrideReason)
 
     // Si la foto es nueva (recién tomada, no venía ya de la galería), se
     // guarda para poder reutilizarla en el próximo producto igual.
     if (!requiresOverride && formData.image && !imageIsFromGallery && saveNewPhotoToGallery && formData.name) {
-      saveToPhotoGallery(formData.name, formData.image)
+      saveToPhotoGallery(formData.name, formData.image, formData.imageCredit)
     }
   }
 
@@ -237,6 +272,12 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
+          {setup && (
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-emerald-600/10 border border-emerald-600/30 px-3 py-2 mb-2 text-sm">
+              <span>Revisando tu catálogo: <strong>{setup.index + 1} de {setup.total}</strong></span>
+              <Button type="button" variant="ghost" size="sm" onClick={setup.onSkip}>Saltar</Button>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2">
             <div>
               <DialogTitle className="text-xl">
@@ -261,11 +302,14 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
               <div className="relative w-32 h-32 rounded-lg overflow-hidden border-2 border-slate-200 dark:border-slate-700 group">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={formData.image} alt="Producto" className="w-full h-full object-cover" />
-                <div className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                  <Button variant="ghost" size="icon" className="text-red-500 hover:bg-red-500/20" onClick={() => { setFormData({ ...formData, image: '' }); setImageIsFromGallery(false) }}>
-                    <Trash2 className="w-6 h-6" />
-                  </Button>
-                </div>
+                <button
+                  type="button"
+                  aria-label="Quitar foto"
+                  className="absolute top-1 right-1 h-8 w-8 rounded-full bg-black/70 hover:bg-black/90 flex items-center justify-center"
+                  onClick={() => { setFormData({ ...formData, image: '', imageCredit: undefined }); setImageIsFromGallery(false) }}
+                >
+                  <Trash2 className="w-4 h-4 text-red-400" />
+                </button>
               </div>
             ) : (
               <div className="w-full max-w-sm flex flex-col gap-2">
@@ -280,6 +324,18 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
                   Elegir foto ya guardada
                 </Button>
               </div>
+            )}
+
+            {isEditing && (
+            <Button type="button" variant="outline" size="sm" className="w-full max-w-sm gap-2" onClick={() => setShowPhotoFinder(true)} disabled={!formData.name?.trim()}>
+              <Search className="w-4 h-4" /> Buscar foto real en internet
+            </Button>
+            )}
+            {!isEditing && !formData.image && (
+              <p className="text-[11px] text-muted-foreground text-center max-w-sm">Producto nuevo: toma la foto con la cámara para que se vea igual que en tu puesto.</p>
+            )}
+            {formData.imageCredit && (
+              <p className="text-[10px] text-muted-foreground text-center max-w-sm">Foto: {formData.imageCredit}</p>
             )}
 
             {formData.image && !imageIsFromGallery && (
@@ -404,7 +460,13 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
                   <button
                     key={st.value}
                     type="button"
-                    onClick={() => setFormData(prev => ({ ...prev, saleType: st.value }))}
+                    onClick={() => {
+                      const cruza = (st.value === 'peso') !== (formData.saleType === 'peso')
+                      setFormData(prev => cruza
+                        ? { ...prev, saleType: st.value, stock: 0, minStock: st.value === 'peso' ? 2000 : 5 }
+                        : { ...prev, saleType: st.value })
+                      if (cruza) { setStockText('0'); setMinStockText(st.value === 'peso' ? '2' : '5') }
+                    }}
                     className={`p-2 rounded-lg border text-left text-xs transition-colors ${formData.saleType === st.value ? 'border-primary bg-primary/10' : 'border-border hover:bg-secondary/50'}`}
                   >
                     <span className="font-semibold block">{st.label}</span>
@@ -486,24 +548,31 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <FieldGroup>
               <Field>
-                <FieldLabel>Stock Actual</FieldLabel>
+                <FieldLabel>Stock Actual {isPeso ? '(kg)' : ''}</FieldLabel>
                 <Input
                   type="number"
-                  value={formData.stock}
-                  onChange={(e) => setFormData(prev => ({ ...prev, stock: parseInt(e.target.value) || 0 }))}
-                  placeholder="0"
+                  inputMode="decimal"
+                  step={isPeso ? '0.1' : '1'}
+                  min="0"
+                  value={stockText}
+                  onChange={(e) => { setStockText(e.target.value); setFormData(prev => ({ ...prev, stock: textToStock(e.target.value, isPeso) })) }}
+                  placeholder={isPeso ? 'Ej: 20 (kilos)' : '0'}
                 />
+                {isPeso && <p className="text-[11px] text-muted-foreground mt-1">En kilos: 20 = 20 kg. Lo guarda en gramos.</p>}
               </Field>
             </FieldGroup>
 
             <FieldGroup>
               <Field>
-                <FieldLabel>Stock Mínimo (Alerta)</FieldLabel>
+                <FieldLabel>Stock Mínimo (Alerta) {isPeso ? '(kg)' : ''}</FieldLabel>
                 <Input
                   type="number"
-                  value={formData.minStock || ''}
-                  onChange={(e) => setFormData(prev => ({ ...prev, minStock: parseInt(e.target.value) || 0 }))}
-                  placeholder="5"
+                  inputMode="decimal"
+                  step={isPeso ? '0.1' : '1'}
+                  min="0"
+                  value={minStockText}
+                  onChange={(e) => { setMinStockText(e.target.value); setFormData(prev => ({ ...prev, minStock: textToStock(e.target.value, isPeso) })) }}
+                  placeholder={isPeso ? 'Ej: 2' : '5'}
                 />
               </Field>
             </FieldGroup>
@@ -600,6 +669,17 @@ export function ProductEditor({ open, onClose, product, onSave, onDelete }: Prod
       </Dialog>
 
       {/* Selector de fotos ya guardadas en la Galería */}
+      <PhotoFinder
+        open={showPhotoFinder}
+        productName={formData.name || ''}
+        onClose={() => setShowPhotoFinder(false)}
+        onPick={(dataUrl, credit) => {
+          setFormData(prev => ({ ...prev, image: dataUrl, imageCredit: credit }))
+          setImageIsFromGallery(false)
+          setSaveNewPhotoToGallery(true)
+        }}
+      />
+
       <Dialog open={showGalleryPicker} onOpenChange={setShowGalleryPicker}>
         <DialogContent className="sm:max-w-md max-h-[80vh] overflow-y-auto">
           <DialogHeader>

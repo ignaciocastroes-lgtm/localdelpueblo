@@ -59,7 +59,7 @@ export function ShiftSelector({ open, sellers, adminPin, onSelect, onAddSeller }
 
   return (
     <Dialog open={open} onOpenChange={() => { }}>
-      <DialogContent className="sm:max-w-md [&>button]:hidden bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 rounded-2xl">
+      <DialogContent showCloseButton={false} className="sm:max-w-md bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 rounded-2xl">
         <DialogHeader className="flex flex-col items-center text-center">
           <div className="w-16 h-16 bg-[#0a1f16] rounded-full flex items-center justify-center mb-2 shadow-lg shadow-blue-900/20">
             <Clock className="w-8 h-8 text-emerald-600" />
